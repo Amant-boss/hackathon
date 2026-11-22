@@ -1,4 +1,3 @@
-
 import React, { useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
@@ -774,13 +773,13 @@ function SelectionPanel({
 
 // ---------- header ----------
 
-function Header({ compact }) {
+function Header({ compact, navigation }) {
   return (
     <View
       style={[
         s.header,
         compact && {
-          paddingHorizontal: 16,
+          paddingHorizontal: 12,
           paddingVertical: 12,
         },
       ]}
@@ -793,7 +792,7 @@ function Header({ compact }) {
         <Text
           style={[
             s.wordmark,
-            compact && { fontSize: 21 },
+            compact && { fontSize: 18 },
           ]}
           numberOfLines={1}
         >
@@ -811,13 +810,25 @@ function Header({ compact }) {
         <View style={s.headerOpenDot} />
         <Text style={s.headerOpenText}>OPEN</Text>
       </View>
+
+      <Pressable
+  onPress={() => navigation?.navigate('AdminAuth')}
+  style={({ pressed }) => [
+    s.adminButton,
+    pressed && { opacity: 0.75, transform: [{ scale: 0.96 }] },
+  ]}
+  accessibilityRole="button"
+  accessibilityLabel="Open admin login"
+>
+  <Text style={s.adminButtonText}>ADMIN ↗</Text>
+</Pressable>
     </View>
   );
 }
 
 // ---------- screen ----------
 
-export default function TablesScreen({ onContinue }) {
+export default function TablesScreen({ onContinue, navigation }) {
   const { width, height } = useWindowDimensions();
 
   const layout =
@@ -1018,7 +1029,7 @@ export default function TablesScreen({ onContinue }) {
     >
       <StatusBar barStyle="dark-content" />
 
-      <Header compact={mobile} />
+      <Header compact={mobile} navigation={navigation} />
 
       <ScrollView
         contentContainerStyle={[
@@ -1117,6 +1128,25 @@ const s = StyleSheet.create({
     backgroundColor: C.cream,
   },
 
+  adminButton: {
+  backgroundColor: C.espresso,
+  paddingHorizontal: 16,
+  paddingVertical: 10,
+  borderRadius: 10,
+  marginLeft: 12,
+  borderWidth: 1,
+  borderColor: C.gold,
+  alignItems: 'center',
+  justifyContent: 'center',
+},
+
+adminButtonText: {
+  color: C.gold,
+  fontFamily: 'Inter_600SemiBold',
+  fontSize: 10,
+  letterSpacing: 1.2,
+},
+
   brandMark: {
     width: 39,
     height: 39,
@@ -1161,6 +1191,7 @@ const s = StyleSheet.create({
     paddingHorizontal: 11,
     paddingVertical: 7,
     marginLeft: 10,
+    marginRight: 10,
   },
 
   headerOpenDot: {
@@ -1176,6 +1207,49 @@ const s = StyleSheet.create({
     fontSize: 9,
     color: '#527456',
     letterSpacing: 1.2,
+  },
+
+  adminButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 15,
+    paddingVertical: 11,
+    borderRadius: 11,
+    backgroundColor: C.espresso,
+    borderWidth: 1,
+    borderColor: C.gold,
+    minWidth: 86,
+    shadowColor: C.espresso,
+    shadowOpacity: 0.13,
+    shadowRadius: 5,
+    shadowOffset: { width: 0, height: 2 },
+    elevation: 3,
+  },
+
+  adminButtonCompact: {
+    paddingHorizontal: 10,
+    paddingVertical: 9,
+    minWidth: 70,
+    marginLeft: 7,
+  },
+
+  adminButtonPressed: {
+    opacity: 0.75,
+    transform: [{ scale: 0.96 }],
+  },
+
+  adminIcon: {
+    fontSize: 13,
+    color: C.gold,
+    marginRight: 6,
+  },
+
+  adminButtonText: {
+    fontFamily: 'Inter_600SemiBold',
+    fontSize: 10,
+    color: '#F4E5C9',
+    letterSpacing: 1,
   },
 
   welcomeEyebrow: {
