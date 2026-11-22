@@ -5,6 +5,8 @@ import { Alert } from 'react-native';
 import TablesScreen from './TablesScreen';
 import MenuScreen from './MenuScreen';
 import CheckoutScreen from './CheckoutScreen';
+import AdminAuth from './AdminAuth';
+import AdminDashboard from './AdminDashboard';
 
 import { cartReducer, initialCart } from './cartLogic';
 
@@ -67,11 +69,32 @@ export default function App() {
     );
   };
 
+  // OPEN ADMIN LOGIN
+  const handleOpenAdmin = () => {
+    setScreen('adminAuth');
+  };
+
+  // CLOSE ADMIN LOGIN
+  const handleCloseAdmin = () => {
+    setScreen('tables');
+  };
+
   // TABLE SCREEN
   if (screen === 'tables') {
     return (
       <TablesScreen
         onContinue={handleTableContinue}
+        onAdminPress={handleOpenAdmin}
+      />
+    );
+  }
+
+  // ADMIN LOGIN SCREEN
+  if (screen === 'adminAuth') {
+    return (
+      <AdminAuth
+        onBack={handleCloseAdmin}
+        onSuccess={() => setScreen('adminDashboard')}
       />
     );
   }
@@ -111,10 +134,20 @@ export default function App() {
     );
   }
 
+  // ADMIN DASHBOARD
+  if (screen === 'adminDashboard') {
+    return (
+      <AdminDashboard
+        onBack={() => setScreen('tables')}
+      />
+    );
+  }
+
   // FALLBACK
   return (
     <TablesScreen
       onContinue={handleTableContinue}
+      onAdminPress={handleOpenAdmin}
     />
   );
 }

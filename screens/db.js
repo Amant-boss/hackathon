@@ -1,3 +1,4 @@
+
 // db.js — local SQLite storage for Amant's Restaurant (Expo)
 
 import * as SQLite from 'expo-sqlite';
@@ -7,10 +8,19 @@ import { sha256 } from '@noble/hashes/sha256';
 import { bytesToHex } from '@noble/hashes/utils';
 import { SEED_CATEGORIES, SEED_PRODUCTS } from './menuData';
 import { SERVICE_CHARGE_PERCENT } from './cartLogic';
-import { ORDER_STATUSES } from './orderLogic';
 
 const DB_NAME = 'amants_restaurant.db';
 const ITERATIONS = 10000;
+
+const ORDER_STATUSES = [
+  'pending',
+  'preparing',
+  'ready',
+  'completed',
+  'cancelled',
+];
+
+const ADMIN_ORDER_STATUSES = ORDER_STATUSES;
 
 let dbPromise = null;
 
@@ -83,10 +93,11 @@ export function getDb() {
           user_id INTEGER REFERENCES users(id),
           customer_name TEXT NOT NULL DEFAULT 'Guest',
           guest_names TEXT NOT NULL DEFAULT '[]',
-          payment_method TEXT NOT NULL DEFAULT 'cash' CHECK (payment_method IN ('cash', 'card')),
+          payment_method TEXT NOT NULL DEFAULT 'cash'
+            CHECK (payment_method IN ('cash', 'card')),
           table_id INTEGER NOT NULL REFERENCES restaurant_tables(id),
           status TEXT NOT NULL DEFAULT 'pending'
-            CHECK (status IN (${ORDER_STATUSES.map((x) => `'${x}'`).join(', ')})),
+            CHECK (status IN ('pending', 'preparing', 'ready', 'completed', 'cancelled')),
           subtotal_cents INTEGER NOT NULL CHECK (subtotal_cents >= 0),
           service_charge_cents INTEGER NOT NULL DEFAULT 0
             CHECK (service_charge_cents >= 0),
@@ -122,16 +133,12 @@ export function getDb() {
         );
       `);
 
-      // Upgrade older databases so orders can belong to guests (user_id = NULL).
       await migrateGuestOrders(db);
       await migratePaymentMethod(db);
 
       await seedTables(db);
       await seedMenu(db);
 
-      // Guest selections are session-only. If the app was restarted,
-      // the previous guest selection is no longer valid.
-      // Release abandoned guest holds so they don't appear occupied.
       await db.runAsync(`
         UPDATE restaurant_tables
         SET status = 'available', held_by = NULL
@@ -145,9 +152,8 @@ export function getDb() {
   return dbPromise;
 }
 
-// Existing installations may have orders.user_id declared NOT NULL.
-// Rebuild only the orders table, preserving existing orders and order_items.
-// Foreign keys are disabled only for the short rebuild operation.
+// ---------- DATABASE MIGRATIONS ----------
+
 async function migrateGuestOrders(db) {
   const columns = await db.getAllAsync('PRAGMA table_info(orders)');
   const userIdColumn = columns.find((column) => column.name === 'user_id');
@@ -170,9 +176,10 @@ async function migrateGuestOrders(db) {
           user_id INTEGER REFERENCES users(id),
           customer_name TEXT NOT NULL DEFAULT 'Guest',
           guest_names TEXT NOT NULL DEFAULT '[]',
+          payment_method TEXT NOT NULL DEFAULT 'cash',
           table_id INTEGER NOT NULL REFERENCES restaurant_tables(id),
           status TEXT NOT NULL DEFAULT 'pending'
-            CHECK (status IN (${ORDER_STATUSES.map((x) => `'${x}'`).join(', ')})),
+            CHECK (status IN ('pending', 'preparing', 'ready', 'completed', 'cancelled')),
           subtotal_cents INTEGER NOT NULL CHECK (subtotal_cents >= 0),
           service_charge_cents INTEGER NOT NULL DEFAULT 0
             CHECK (service_charge_cents >= 0),
@@ -184,15 +191,21 @@ async function migrateGuestOrders(db) {
 
         INSERT INTO orders_guest_migration (
           id, order_number, request_key, user_id, customer_name, guest_names,
-          table_id, status, subtotal_cents, service_charge_cents, total_cents,
-          special_instructions, created_at, updated_at
+          payment_method, table_id, status, subtotal_cents,
+          service_charge_cents, total_cents, special_instructions,
+          created_at, updated_at
         )
         SELECT
           o.id, o.order_number, o.request_key, o.user_id,
-          COALESCE((SELECT full_name FROM users WHERE users.id = o.user_id), 'Guest'),
+          COALESCE(
+            (SELECT full_name FROM users WHERE users.id = o.user_id),
+            'Guest'
+          ),
           '[]',
-          o.table_id, o.status, o.subtotal_cents, o.service_charge_cents,
-          o.total_cents, o.special_instructions, o.created_at, o.updated_at
+          'cash',
+          o.table_id, o.status, o.subtotal_cents,
+          o.service_charge_cents, o.total_cents,
+          o.special_instructions, o.created_at, o.updated_at
         FROM orders AS o;
 
         DROP TABLE orders;
@@ -208,9 +221,9 @@ async function migrateGuestOrders(db) {
   }
 }
 
-// Add the payment method to databases created before this feature.
 async function migratePaymentMethod(db) {
   const columns = await db.getAllAsync('PRAGMA table_info(orders)');
+
   if (!columns.some((column) => column.name === 'payment_method')) {
     await db.execAsync(
       "ALTER TABLE orders ADD COLUMN payment_method TEXT NOT NULL DEFAULT 'cash' CHECK (payment_method IN ('cash', 'card'))"
@@ -220,8 +233,6 @@ async function migratePaymentMethod(db) {
 
 // ---------- SEED DATA ----------
 
-// All demo tables start available.
-// Actual occupancy should be determined by real restaurant activity.
 const SEED_TABLES = [
   [1, 'Window Seating', 2, 'available'],
   [2, 'Window Seating', 2, 'available'],
@@ -253,8 +264,6 @@ async function seedTables(db) {
     }
   }
 
-  // Remove the original fake occupied seed statuses from existing databases.
-  // Never free a table that has an actual order associated with it.
   const migration = await db.getFirstAsync(
     `SELECT migration_key
      FROM app_migrations
@@ -454,10 +463,6 @@ export async function countUsers() {
 
 const padNum = (n) => String(n).padStart(2, '0');
 
-// Supports both:
-// getTables()       -> guest
-// getTables(userId) -> existing account
-
 export async function getTables(userId = null) {
   const db = await getDb();
 
@@ -497,10 +502,6 @@ export async function getTables(userId = null) {
     };
   });
 }
-
-// Supports both:
-// selectTable(tableId)          -> guest
-// selectTable(userId, tableId)  -> existing account
 
 export async function selectTable(first, second) {
   const isGuest = second === undefined;
@@ -542,7 +543,6 @@ export async function selectTable(first, second) {
         return;
       }
 
-      // The same guest/account already has this table.
       if (
         table.status === 'held' &&
         (
@@ -563,7 +563,6 @@ export async function selectTable(first, second) {
         return;
       }
 
-      // Release this guest's previous selection.
       if (isGuest) {
         await db.runAsync(
           `UPDATE restaurant_tables
@@ -579,7 +578,6 @@ export async function selectTable(first, second) {
         );
       }
 
-      // Claim the new table only if it is still available.
       let update;
 
       if (isGuest) {
@@ -620,10 +618,6 @@ export async function selectTable(first, second) {
     };
   }
 }
-
-// Supports both:
-// confirmTable(tableId)          -> guest
-// confirmTable(userId, tableId)  -> existing account
 
 export async function confirmTable(first, second) {
   const isGuest = second === undefined;
@@ -951,7 +945,6 @@ export async function placeOrder({
       let t = null;
 
       if (isGuest) {
-        // Guest table holds are tracked in memory for this app session.
         if (guestSelectedTableId === tid) {
           t = await db.getFirstAsync(
             `SELECT id FROM restaurant_tables
@@ -1129,5 +1122,568 @@ export async function getOrder(orderId, userId) {
     return order && order.userId === userId ? order : null;
   } catch (e) {
     return null;
+  }
+}
+
+// =========================================================
+// ADMIN DASHBOARD DATABASE FUNCTIONS
+// =========================================================
+
+export async function getAdminDashboardData() {
+  const db = await getDb();
+
+  const [orders, products, tables, stats] = await Promise.all([
+    db.getAllAsync(`
+      SELECT
+        o.id,
+        o.order_number,
+        o.customer_name,
+        o.guest_names,
+        o.table_id,
+        o.status,
+        o.payment_method,
+        o.subtotal_cents,
+        o.service_charge_cents,
+        o.total_cents,
+        o.special_instructions,
+        o.created_at,
+        t.section AS table_section,
+
+        (
+          SELECT COUNT(*)
+          FROM order_items oi
+          WHERE oi.order_id = o.id
+        ) AS item_count,
+
+        (
+          SELECT group_concat(
+            product_name_snapshot || ' × ' || quantity,
+            ', '
+          )
+          FROM order_items oi
+          WHERE oi.order_id = o.id
+        ) AS item_summary
+
+      FROM orders o
+      LEFT JOIN restaurant_tables t
+        ON t.id = o.table_id
+      ORDER BY o.id DESC
+    `),
+
+    db.getAllAsync(`
+      SELECT
+        p.id,
+        p.name,
+        p.description,
+        p.price_cents,
+        p.image_url,
+        p.ingredients,
+        p.allergen_info,
+        p.dietary_labels,
+        p.is_available,
+        p.is_featured,
+        p.prep_minutes,
+        p.category_id,
+        c.name AS category_name
+
+      FROM products p
+      LEFT JOIN categories c
+        ON c.id = p.category_id
+      ORDER BY c.display_order, p.name
+    `),
+
+    db.getAllAsync(`
+      SELECT
+        t.id,
+        t.section,
+        t.seats,
+        t.status,
+        t.held_by,
+
+        (
+          SELECT o.order_number
+          FROM orders o
+          WHERE o.table_id = t.id
+            AND o.status NOT IN ('cancelled', 'completed')
+          ORDER BY o.id DESC
+          LIMIT 1
+        ) AS current_order
+
+      FROM restaurant_tables t
+      ORDER BY t.id
+    `),
+
+    db.getFirstAsync(`
+      SELECT
+        COUNT(*) AS total_orders,
+
+        COALESCE(
+          SUM(CASE
+            WHEN status = 'pending' THEN 1
+            ELSE 0
+          END), 0
+        ) AS pending_orders,
+
+        COALESCE(
+          SUM(CASE
+            WHEN status != 'cancelled' THEN total_cents
+            ELSE 0
+          END), 0
+        ) AS revenue
+
+      FROM orders
+    `),
+  ]);
+
+  return {
+    orders,
+    products,
+    tables,
+
+    stats: {
+      totalOrders: Number(stats?.total_orders || 0),
+      pendingOrders: Number(stats?.pending_orders || 0),
+      revenue: Number(stats?.revenue || 0),
+
+      totalProducts: products.length,
+      availableProducts: products.filter(
+        product => Number(product.is_available) === 1
+      ).length,
+
+      totalTables: tables.length,
+      occupiedTables: tables.filter(
+        table => table.status === 'occupied'
+      ).length,
+
+      heldTables: tables.filter(
+        table => table.status === 'held'
+      ).length,
+
+      availableTables: tables.filter(
+        table => table.status === 'available'
+      ).length,
+    },
+  };
+}
+
+export async function setProductAvailability(productId, isAvailable) {
+  const db = await getDb();
+
+  await db.runAsync(
+    `UPDATE products
+     SET is_available = ?,
+         updated_at = datetime('now')
+     WHERE id = ?`,
+    [isAvailable ? 1 : 0, productId]
+  );
+
+  return true;
+}
+
+// ---------- ORDER MANAGEMENT ----------
+
+export async function updateAdminOrderStatus(orderId, nextStatus) {
+  if (!ADMIN_ORDER_STATUSES.includes(nextStatus)) {
+    return { ok: false, error: 'Invalid order status.' };
+  }
+
+  const db = await getDb();
+
+  try {
+    let result = { ok: false, error: 'Order not found.' };
+
+    await db.withTransactionAsync(async () => {
+      const order = await db.getFirstAsync(
+        'SELECT id, table_id, status FROM orders WHERE id = ?',
+        [Number(orderId)]
+      );
+
+      if (!order) return;
+
+      if (
+        order.status === 'cancelled' ||
+        order.status === 'completed'
+      ) {
+        result = {
+          ok: false,
+          error: 'This order is already closed.',
+        };
+        return;
+      }
+
+      await db.runAsync(
+        `UPDATE orders
+         SET status = ?, updated_at = datetime('now')
+         WHERE id = ?`,
+        [nextStatus, Number(orderId)]
+      );
+
+      if (
+        nextStatus === 'preparing' ||
+        nextStatus === 'ready'
+      ) {
+        await db.runAsync(
+          `UPDATE restaurant_tables
+           SET status = 'occupied', held_by = NULL
+           WHERE id = ?`,
+          [order.table_id]
+        );
+      }
+
+      if (
+        nextStatus === 'completed' ||
+        nextStatus === 'cancelled'
+      ) {
+        const active = await db.getFirstAsync(
+          `SELECT COUNT(*) AS n
+           FROM orders
+           WHERE table_id = ?
+             AND id != ?
+             AND status NOT IN ('completed', 'cancelled')`,
+          [order.table_id, Number(orderId)]
+        );
+
+        if (Number(active?.n || 0) === 0) {
+          await db.runAsync(
+            `UPDATE restaurant_tables
+             SET status = 'available', held_by = NULL
+             WHERE id = ?`,
+            [order.table_id]
+          );
+        }
+      }
+
+      result = { ok: true };
+    });
+
+    return result;
+  } catch (error) {
+    console.error('Admin order status error:', error);
+    return {
+      ok: false,
+      error: 'Could not update this order.',
+    };
+  }
+}
+
+// ---------- PRODUCT MANAGEMENT ----------
+
+export async function saveAdminProduct(product) {
+  const db = await getDb();
+
+  const name = String(product.name || '').trim();
+  const description = String(product.description || '').trim();
+  const price = Math.round(Number(product.priceCents));
+  const categoryId = Number(product.categoryId);
+  const prep = Math.round(Number(product.prepMinutes));
+
+  if (!name || !description) {
+    return { ok: false, error: 'Enter a product name and description.' };
+  }
+
+  if (!Number.isFinite(price) || price < 0) {
+    return { ok: false, error: 'Enter a valid price in cents.' };
+  }
+
+  if (!Number.isInteger(categoryId)) {
+    return { ok: false, error: 'Choose a valid category.' };
+  }
+
+  if (!Number.isFinite(prep) || prep < 1 || prep > 300) {
+    return {
+      ok: false,
+      error: 'Preparation time must be between 1 and 300 minutes.',
+    };
+  }
+
+  const ingredients = Array.isArray(product.ingredients)
+    ? product.ingredients
+    : String(product.ingredients || '')
+        .split(',')
+        .map((item) => item.trim())
+        .filter(Boolean);
+
+  try {
+    const category = await db.getFirstAsync(
+      'SELECT id FROM categories WHERE id = ?',
+      [categoryId]
+    );
+
+    if (!category) {
+      return { ok: false, error: 'That category does not exist.' };
+    }
+
+    const values = [
+      name,
+      description,
+      price,
+      String(product.imageUrl || '').trim() || null,
+      categoryId,
+      JSON.stringify(ingredients),
+      String(product.allergenInfo || '').trim()
+        ? JSON.stringify(
+            String(product.allergenInfo)
+              .split(',')
+              .map((x) => x.trim())
+              .filter(Boolean)
+          )
+        : null,
+      JSON.stringify(
+        Array.isArray(product.dietary)
+          ? product.dietary
+          : String(product.dietary || '')
+              .split(',')
+              .map((x) => x.trim())
+              .filter(Boolean)
+      ),
+      prep,
+      product.available === false ? 0 : 1,
+      product.featured ? 1 : 0,
+    ];
+
+    if (product.id) {
+      await db.runAsync(
+        `UPDATE products
+         SET name = ?,
+             description = ?,
+             price_cents = ?,
+             image_url = ?,
+             category_id = ?,
+             ingredients = ?,
+             allergen_info = ?,
+             dietary_labels = ?,
+             prep_minutes = ?,
+             is_available = ?,
+             is_featured = ?,
+             updated_at = datetime('now')
+         WHERE id = ?`,
+        [...values, Number(product.id)]
+      );
+
+      return { ok: true, id: Number(product.id) };
+    }
+
+    const inserted = await db.runAsync(
+      `INSERT INTO products (
+        name, description, price_cents, image_url, category_id,
+        ingredients, allergen_info, dietary_labels, prep_minutes,
+        is_available, is_featured
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      values
+    );
+
+    return { ok: true, id: inserted.lastInsertRowId };
+  } catch (error) {
+    console.error('Save admin product error:', error);
+    return { ok: false, error: 'Could not save this product.' };
+  }
+}
+
+export async function deleteAdminProduct(productId) {
+  const db = await getDb();
+
+  try {
+    await db.runAsync(
+      'DELETE FROM products WHERE id = ?',
+      [Number(productId)]
+    );
+
+    return { ok: true };
+  } catch (error) {
+    console.error('Delete product error:', error);
+    return { ok: false, error: 'Could not delete this product.' };
+  }
+}
+
+// ---------- CATEGORY MANAGEMENT ----------
+
+export async function getAdminCategories() {
+  const db = await getDb();
+
+  return db.getAllAsync(
+    `SELECT id, slug, name, description, image_url,
+            display_order, is_active
+     FROM categories
+     ORDER BY display_order, name`
+  );
+}
+
+export async function saveAdminCategory(category) {
+  const db = await getDb();
+
+  const name = String(category.name || '').trim();
+  const description = String(category.description || '').trim();
+
+  if (!name) {
+    return { ok: false, error: 'Category name is required.' };
+  }
+
+  try {
+    if (category.id) {
+      await db.runAsync(
+        `UPDATE categories
+         SET name = ?, description = ?
+         WHERE id = ?`,
+        [name, description, Number(category.id)]
+      );
+
+      return { ok: true, id: Number(category.id) };
+    }
+
+    const slug = name
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-|-$/g, '') + '-' + Date.now();
+
+    const result = await db.runAsync(
+      `INSERT INTO categories (slug, name, description)
+       VALUES (?, ?, ?)`,
+      [slug, name, description]
+    );
+
+    return { ok: true, id: result.lastInsertRowId };
+  } catch (error) {
+    console.error('Save category error:', error);
+    return {
+      ok: false,
+      error: 'Could not save this category. Check that its name is unique.',
+    };
+  }
+}
+
+export async function setAdminCategoryActive(categoryId, active) {
+  const db = await getDb();
+
+  await db.runAsync(
+    'UPDATE categories SET is_active = ? WHERE id = ?',
+    [active ? 1 : 0, Number(categoryId)]
+  );
+
+  return { ok: true };
+}
+
+// ---------- TABLE MANAGEMENT ----------
+
+export async function saveAdminTable(table) {
+  const db = await getDb();
+
+  const id = Number(table.id);
+  const seats = Number(table.seats);
+  const section = String(table.section || '').trim();
+
+  if (!Number.isInteger(id) || id < 1) {
+    return { ok: false, error: 'Enter a valid table number.' };
+  }
+
+  if (!section) {
+    return { ok: false, error: 'Enter a table section.' };
+  }
+
+  if (!Number.isInteger(seats) || seats < 1 || seats > 30) {
+    return {
+      ok: false,
+      error: 'Seats must be between 1 and 30.',
+    };
+  }
+
+  try {
+    if (table.isNew) {
+      await db.runAsync(
+        `INSERT INTO restaurant_tables
+         (id, section, seats, status, held_by)
+         VALUES (?, ?, ?, 'available', NULL)`,
+        [id, section, seats]
+      );
+    } else {
+      await db.runAsync(
+        `UPDATE restaurant_tables
+         SET section = ?, seats = ?
+         WHERE id = ?`,
+        [section, seats, id]
+      );
+    }
+
+    return { ok: true };
+  } catch (error) {
+    console.error('Save table error:', error);
+    return {
+      ok: false,
+      error: 'Could not save this table. The table number may already exist.',
+    };
+  }
+}
+
+export async function setAdminTableStatus(tableId, status) {
+  if (!['available', 'occupied', 'held'].includes(status)) {
+    return { ok: false, error: 'Invalid table status.' };
+  }
+
+  const db = await getDb();
+
+  try {
+    const table = await db.getFirstAsync(
+      'SELECT id FROM restaurant_tables WHERE id = ?',
+      [Number(tableId)]
+    );
+
+    if (!table) {
+      return { ok: false, error: 'Table not found.' };
+    }
+
+    const activeOrder = await db.getFirstAsync(
+      `SELECT id FROM orders
+       WHERE table_id = ?
+         AND status NOT IN ('completed', 'cancelled')
+       LIMIT 1`,
+      [Number(tableId)]
+    );
+
+    if (status === 'available' && activeOrder) {
+      return {
+        ok: false,
+        error: 'This table has an active order. Complete or cancel that order first.',
+      };
+    }
+
+    await db.runAsync(
+      `UPDATE restaurant_tables
+       SET status = ?, held_by = NULL
+       WHERE id = ?`,
+      [status, Number(tableId)]
+    );
+
+    return { ok: true };
+  } catch (error) {
+    console.error('Set table status error:', error);
+    return { ok: false, error: 'Could not update table status.' };
+  }
+}
+
+export async function deleteAdminTable(tableId) {
+  const db = await getDb();
+
+  try {
+    const order = await db.getFirstAsync(
+      'SELECT id FROM orders WHERE table_id = ? LIMIT 1',
+      [Number(tableId)]
+    );
+
+    if (order) {
+      return {
+        ok: false,
+        error: 'This table has order history and cannot be deleted.',
+      };
+    }
+
+    await db.runAsync(
+      'DELETE FROM restaurant_tables WHERE id = ?',
+      [Number(tableId)]
+    );
+
+    return { ok: true };
+  } catch (error) {
+    console.error('Delete table error:', error);
+    return { ok: false, error: 'Could not delete this table.' };
   }
 }

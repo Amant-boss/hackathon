@@ -1,3 +1,4 @@
+
 import React, { useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
@@ -52,7 +53,7 @@ const TONE = {
   },
 };
 
-// ---------- table illustration ----------
+// ---------- TABLE ILLUSTRATION ----------
 
 function TableTile({ table, onPress, busy, compact }) {
   const { id, seats, state } = table;
@@ -252,7 +253,7 @@ function TableTile({ table, onPress, busy, compact }) {
   );
 }
 
-// ---------- decorative elements ----------
+// ---------- DECORATIVE ELEMENTS ----------
 
 function Plant({ size = 26 }) {
   return (
@@ -341,7 +342,7 @@ function FloorStats({ tables, compact }) {
   );
 }
 
-// ---------- floor plan ----------
+// ---------- FLOOR PLAN ----------
 
 function Floor({ tables, layout, onSelect, busyId }) {
   const compact = layout === 'mobile';
@@ -483,7 +484,7 @@ function Floor({ tables, layout, onSelect, busyId }) {
   );
 }
 
-// ---------- legend ----------
+// ---------- LEGEND ----------
 
 function Legend() {
   const items = [
@@ -522,7 +523,7 @@ function Legend() {
   );
 }
 
-// ---------- continue button ----------
+// ---------- CONTINUE BUTTON ----------
 
 function ContinueButton({ disabled, loading, onPress }) {
   const scale = useRef(new Animated.Value(1)).current;
@@ -587,7 +588,7 @@ function ContinueButton({ disabled, loading, onPress }) {
   );
 }
 
-// ---------- selection panel ----------
+// ---------- SELECTION PANEL ----------
 
 function SelectionPanel({
   table,
@@ -771,9 +772,9 @@ function SelectionPanel({
   );
 }
 
-// ---------- header ----------
+// ---------- HEADER ----------
 
-function Header({ compact, navigation }) {
+function Header({ compact, onAdminPress }) {
   return (
     <View
       style={[
@@ -812,23 +813,30 @@ function Header({ compact, navigation }) {
       </View>
 
       <Pressable
-  onPress={() => navigation?.navigate('AdminAuth')}
-  style={({ pressed }) => [
-    s.adminButton,
-    pressed && { opacity: 0.75, transform: [{ scale: 0.96 }] },
-  ]}
-  accessibilityRole="button"
-  accessibilityLabel="Open admin login"
->
-  <Text style={s.adminButtonText}>ADMIN ↗</Text>
-</Pressable>
+        onPress={onAdminPress}
+        disabled={!onAdminPress}
+        style={({ pressed }) => [
+          s.adminButton,
+          compact && s.adminButtonCompact,
+          pressed && s.adminButtonPressed,
+          web({
+            cursor: onAdminPress ? 'pointer' : 'default',
+          }),
+        ]}
+        accessibilityRole="button"
+        accessibilityLabel="Open admin login"
+      >
+        <Text style={s.adminIcon}>♙</Text>
+        <Text style={s.adminButtonText}>ADMIN</Text>
+        <Text style={s.adminIcon}>↗</Text>
+      </Pressable>
     </View>
   );
 }
 
-// ---------- screen ----------
+// ---------- SCREEN ----------
 
-export default function TablesScreen({ onContinue, navigation }) {
+export default function TablesScreen({ onContinue, onAdminPress }) {
   const { width, height } = useWindowDimensions();
 
   const layout =
@@ -1029,7 +1037,7 @@ export default function TablesScreen({ onContinue, navigation }) {
     >
       <StatusBar barStyle="dark-content" />
 
-      <Header compact={mobile} navigation={navigation} />
+      <Header compact={mobile} onAdminPress={onAdminPress} />
 
       <ScrollView
         contentContainerStyle={[
@@ -1097,7 +1105,7 @@ export default function TablesScreen({ onContinue, navigation }) {
   );
 }
 
-// ---------- styles ----------
+// ---------- STYLES ----------
 
 const s = StyleSheet.create({
   root: {
@@ -1127,25 +1135,6 @@ const s = StyleSheet.create({
     borderBottomColor: C.beige,
     backgroundColor: C.cream,
   },
-
-  adminButton: {
-  backgroundColor: C.espresso,
-  paddingHorizontal: 16,
-  paddingVertical: 10,
-  borderRadius: 10,
-  marginLeft: 12,
-  borderWidth: 1,
-  borderColor: C.gold,
-  alignItems: 'center',
-  justifyContent: 'center',
-},
-
-adminButtonText: {
-  color: C.gold,
-  fontFamily: 'Inter_600SemiBold',
-  fontSize: 10,
-  letterSpacing: 1.2,
-},
 
   brandMark: {
     width: 39,
@@ -1242,7 +1231,7 @@ adminButtonText: {
   adminIcon: {
     fontSize: 13,
     color: C.gold,
-    marginRight: 6,
+    marginHorizontal: 3,
   },
 
   adminButtonText: {
