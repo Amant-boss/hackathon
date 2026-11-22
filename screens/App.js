@@ -10,7 +10,7 @@
 // and hashed, never stored in plaintext). Passwords live only in component state
 // and are cleared after submit. See db.js for what local storage can and cannot do.
 
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useReducer, useRef, useState } from 'react';
 import {
   Animated,
   ActivityIndicator,
@@ -30,7 +30,10 @@ import {
 import { C } from './theme';
 import { registerUser, loginUser, releaseTable } from './db';
 import TablesScreen from './TablesScreen';
-import MenuPlaceholder from './MenuPlaceholder';
+import MenuScreen from './MenuScreen';
+import CheckoutScreen from './CheckoutScreen';
+import OrderConfirmation from './OrderConfirmation';
+import { cartReducer, initialCart } from './cartLogic';
 import { useFonts, PlayfairDisplay_600SemiBold, PlayfairDisplay_500Medium_Italic } from '@expo-google-fonts/playfair-display';
 import { Inter_400Regular, Inter_500Medium, Inter_600SemiBold } from '@expo-google-fonts/inter';
 
@@ -465,7 +468,10 @@ export default function App() {
     Inter_600SemiBold,
   });
   const [session, setSession] = useState(null); // { user, isNew }; kept in memory only
-  const [table, setTable] = useState(null); // table chosen on the selection screen
+  const [table, setTable] = useState(null); // table chosen on the selection screen (single source of truth)
+  const [stage, setStage] = useState('menu'); // 'menu' | 'checkout' | 'confirmation'
+  const [order, setOrder] = useState(null); // the order just placed
+  const [cart, dispatch] = useReducer(cartReducer, initialCart);
 
   if (!fontsLoaded) {
     return (
@@ -479,21 +485,55 @@ export default function App() {
     return <AuthScreen onAuthenticated={(user, isNew) => setSession({ user, isNew })} />;
   }
 
+  const logout = async () => {
+    await releaseTable(session.user.id);
+    dispatch({ type: 'clear' });
+    setTable(null);
+    setStage('menu');
+    setOrder(null);
+    setSession(null);
+  };
+
   if (!table) {
     return (
       <TablesScreen
         user={session.user}
         isNew={session.isNew}
-        onContinue={setTable}
-        onLogout={async () => {
-          await releaseTable(session.user.id);
-          setSession(null);
-        }}
+        onContinue={(t) => { setTable(t); setStage('menu'); }}
+        onLogout={logout}
       />
     );
   }
 
-  return <MenuPlaceholder user={session.user} table={table} onBack={() => setTable(null)} />;
+  if (stage === 'confirmation' && order) {
+    return <OrderConfirmation order={order} onDone={() => { setOrder(null); setStage('menu'); }} />;
+  }
+
+  if (stage === 'checkout') {
+    return (
+      <CheckoutScreen
+        user={session.user}
+        table={table}
+        cart={cart}
+        dispatch={dispatch}
+        onBack={() => setStage('menu')}
+        onChangeTable={() => { setStage('menu'); setTable(null); }}
+        onPlaced={(placed) => { dispatch({ type: 'clear' }); setOrder(placed); setStage('confirmation'); }}
+      />
+    );
+  }
+
+  return (
+    <MenuScreen
+      user={session.user}
+      table={table}
+      cart={cart}
+      dispatch={dispatch}
+      onLogout={logout}
+      onChangeTable={() => setTable(null)}
+      onCheckout={() => setStage('checkout')}
+    />
+  );
 }
 
 // ---------- styles ----------

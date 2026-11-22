@@ -44,6 +44,9 @@ export function cartReducer(state, action) {
     }
     case 'remove':
       return { ...state, lines: state.lines.filter((l) => l.key !== action.key) };
+    case 'syncPrices':
+      // Adopt current prices reported by the server (after a PRICE_CHANGED response).
+      return { ...state, lines: state.lines.map((l) => (Number.isInteger(action.prices[l.productId]) ? { ...l, unitCents: action.prices[l.productId] } : l)) };
     case 'clear':
       return initialCart;
     default:
