@@ -1,11 +1,8 @@
 
-// CheckoutScreen.js — review the order and place it.
-// The order is created by placeOrder() in db.js, which re-reads every price and checks the
-// table and availability again. The totals shown here are only a preview.
-
-import React, { useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
+  Keyboard,
   Platform,
   Pressable,
   SafeAreaView,
@@ -26,7 +23,7 @@ import { placeOrder } from './db';
 const pad = (n) => String(n).padStart(2, '0');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-function PlaceButton({ loading, disabled, onPress }) {
+function PlaceButton({ loading, disabled, onPress, paymentMethod = 'cash' }) {
   const off = loading || disabled;
 
   return (
@@ -49,7 +46,11 @@ function PlaceButton({ loading, disabled, onPress }) {
       {loading ? (
         <View style={s.loadingContent}>
           <ActivityIndicator color={C.espresso} size="small" />
-          <Text style={s.placeText}>Placing your order...</Text>
+          <Text style={s.placeText}>
+            {paymentMethod === 'card'
+              ? 'Processing payment...'
+              : 'Placing your order...'}
+          </Text>
         </View>
       ) : (
         <View style={s.buttonContent}>
@@ -84,77 +85,193 @@ export default function CheckoutScreen({
   const { width } = useWindowDimensions();
 
   const wide = width >= 900;
-  const compact = width < 420;
+  const compact = width < 380;
+  const smallPhone = width < 350;
   const tablet = width >= 600 && width < 900;
 
   const t = cartTotals(cart.lines);
   const empty = cart.lines.length === 0;
 
   const [note, setNote] = useState('');
+  const [paymentMethod, setPaymentMethod] = useState('cash');
   const [submitting, setSubmitting] = useState(false);
   const [problem, setProblem] = useState(null);
 
-  // One key per checkout visit: a double tap or retry can never create two orders.
+  const [cardName, setCardName] = useState('');
+  const [cardNumber, setCardNumber] = useState('');
+  const [cardExpiry, setCardExpiry] = useState('');
+  const [cardCvv, setCardCvv] = useState('');
+
+  const [keyboardVisible, setKeyboardVisible] = useState(false);
+
+  useEffect(() => {
+    const showEvent =
+      Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
+    const hideEvent =
+      Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide';
+
+    const showSubscription = Keyboard.addListener(showEvent, () => {
+      setKeyboardVisible(true);
+    });
+
+    const hideSubscription = Keyboard.addListener(hideEvent, () => {
+      setKeyboardVisible(false);
+    });
+
+    return () => {
+      showSubscription.remove();
+      hideSubscription.remove();
+    };
+  }, []);
+
   const requestKey = useRef(
-    `${user.id}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
+    `${user?.id ?? 'guest'}-${Date.now()}-${Math.random()
+      .toString(36)
+      .slice(2, 10)}`
   ).current;
 
-  const pagePadding = compact ? 16 : tablet ? 28 : 32;
-  const imageSize = compact ? 58 : 68;
+  const pagePadding = smallPhone ? 12 : compact ? 16 : tablet ? 28 : 32;
+  const imageSize = compact ? 54 : 68;
+
+  const formatCardNumber = (value) =>
+    value
+      .replace(/\D/g, '')
+      .slice(0, 19)
+      .replace(/(.{4})/g, '$1 ')
+      .trim();
+
+  const formatExpiry = (value) => {
+    const digits = value.replace(/\D/g, '').slice(0, 4);
+
+    if (digits.length <= 2) return digits;
+
+    return `${digits.slice(0, 2)}/${digits.slice(2)}`;
+  };
+
+  // Accepts a general card-number format instead of requiring one fixed number.
+  const validateDemoCard = () => {
+    if (!cardName.trim()) {
+      return 'Please enter the cardholder name.';
+    }
+
+    const digits = cardNumber.replace(/\D/g, '');
+
+    if (digits.length < 12 || digits.length > 19) {
+      return 'Enter a card number containing 12–19 digits.';
+    }
+
+    if (!/^(0[1-9]|1[0-2])\/\d{2}$/.test(cardExpiry)) {
+      return 'Enter a valid expiry date in MM/YY format.';
+    }
+
+    const [month, year] = cardExpiry.split('/').map(Number);
+    const now = new Date();
+    const currentYear = now.getFullYear() % 100;
+    const currentMonth = now.getMonth() + 1;
+
+    if (
+      year < currentYear ||
+      (year === currentYear && month < currentMonth)
+    ) {
+      return 'The expiry date must be in the future.';
+    }
+
+    if (!/^\d{3,4}$/.test(cardCvv)) {
+      return 'Enter a 3–4 digit security code.';
+    }
+
+    return null;
+  };
 
   const place = async () => {
     if (submitting || empty) return;
 
-    setSubmitting(true);
+    Keyboard.dismiss();
     setProblem(null);
 
-    const [res] = await Promise.all([
-      placeOrder({
-        userId: user.id,
-        tableId: table.id,
-        lines: cart.lines.map((l) => ({
-          productId: l.productId,
-          quantity: l.quantity,
-          instructions: l.instructions,
-          options: l.options,
-        })),
-        note,
-        expectedTotalCents: t.totalCents,
-        requestKey,
-      }),
-      sleep(700),
-    ]);
+    if (paymentMethod === 'card') {
+      const cardError = validateDemoCard();
 
-    if (res.ok) {
-      onPlaced(res.order);
-      return;
+      if (cardError) {
+        setProblem({
+          kind: 'generic',
+          text: cardError,
+        });
+        return;
+      }
     }
 
-    if (res.code === 'PRICE_CHANGED') {
-      dispatch({ type: 'syncPrices', prices: res.prices });
-      setProblem({
-        kind: 'price',
-        text: 'Some prices have changed. Your total has been updated. Please review it and place your order again.',
-      });
-    } else if (res.code === 'UNAVAILABLE') {
-      setProblem({
-        kind: 'unavailable',
-        text: res.error,
-        unavailable: res.unavailable,
-      });
-    } else if (res.code === 'TABLE') {
-      setProblem({
-        kind: 'table',
-        text: res.error,
-      });
-    } else {
+    setSubmitting(true);
+
+    try {
+      if (paymentMethod === 'card') {
+        await sleep(1200);
+      }
+
+      const [res] = await Promise.all([
+        placeOrder({
+          userId: user?.id ?? null,
+          customerName: user?.fullName || '',
+          guestNames: Array.isArray(user?.guestNames)
+            ? user.guestNames
+            : [],
+          paymentMethod,
+          tableId: table.id,
+          lines: cart.lines.map((l) => ({
+            productId: l.productId,
+            quantity: l.quantity,
+            instructions: l.instructions,
+            options: l.options,
+          })),
+          note,
+          expectedTotalCents: t.totalCents,
+          requestKey,
+        }),
+        sleep(700),
+      ]);
+
+      if (res.ok) {
+        onPlaced({
+          ...res.order,
+          paymentStatus: paymentMethod === 'card' ? 'demo_paid' : 'unpaid',
+        });
+        return;
+      }
+
+      if (res.code === 'PRICE_CHANGED') {
+        dispatch({ type: 'syncPrices', prices: res.prices });
+
+        setProblem({
+          kind: 'price',
+          text: 'Some prices have changed. Your total has been updated. Please review it and place your order again.',
+        });
+      } else if (res.code === 'UNAVAILABLE') {
+        setProblem({
+          kind: 'unavailable',
+          text: res.error,
+          unavailable: res.unavailable,
+        });
+      } else if (res.code === 'TABLE') {
+        setProblem({
+          kind: 'table',
+          text: res.error,
+        });
+      } else {
+        setProblem({
+          kind: 'generic',
+          text:
+            res.error || "We couldn't place your order. Please try again.",
+        });
+      }
+    } catch (error) {
       setProblem({
         kind: 'generic',
-        text: res.error || "We couldn't place your order. Please try again.",
+        text:
+          error?.message || "We couldn't place your order. Please try again.",
       });
+    } finally {
+      setSubmitting(false);
     }
-
-    setSubmitting(false);
   };
 
   const removeUnavailable = () => {
@@ -166,6 +283,13 @@ export default function CheckoutScreen({
       .filter((l) => ids.has(l.productId))
       .forEach((l) => dispatch({ type: 'remove', key: l.key }));
 
+    setProblem(null);
+  };
+
+  const changePaymentMethod = (method) => {
+    if (submitting) return;
+
+    setPaymentMethod(method);
     setProblem(null);
   };
 
@@ -212,14 +336,12 @@ export default function CheckoutScreen({
           <Text style={s.rowText}>
             Service charge ({SERVICE_CHARGE_PERCENT}%)
           </Text>
-          <Text style={s.rowValue}>
-            {formatPrice(t.serviceCents)}
-          </Text>
+          <Text style={s.rowValue}>{formatPrice(t.serviceCents)}</Text>
         </View>
       )}
 
       <View style={s.totalRow}>
-        <View>
+        <View style={s.totalDetails}>
           <Text style={s.totalLabel}>Total</Text>
           <Text style={s.totalHint}>Including applicable charges</Text>
         </View>
@@ -232,7 +354,9 @@ export default function CheckoutScreen({
     <View style={s.card}>
       <SectionHeading
         title="Your order"
-        subtitle={`${cart.lines.length} ${cart.lines.length === 1 ? 'item' : 'items'} selected`}
+        subtitle={`${cart.lines.length} ${
+          cart.lines.length === 1 ? 'item' : 'items'
+        } selected`}
       />
 
       {cart.lines.map((l, i) => (
@@ -259,15 +383,10 @@ export default function CheckoutScreen({
           <View style={s.itemDetails}>
             <Text style={s.itemQuantity}>{l.quantity} ×</Text>
             <Text style={s.name}>{l.name}</Text>
-
-            <Text style={s.unit}>
-              {formatPrice(l.unitCents)} each
-            </Text>
+            <Text style={s.unit}>{formatPrice(l.unitCents)} each</Text>
 
             {!!l.instructions && (
-              <Text style={s.note}>
-                Note: {l.instructions}
-              </Text>
+              <Text style={s.note}>Note: {l.instructions}</Text>
             )}
           </View>
 
@@ -307,6 +426,194 @@ export default function CheckoutScreen({
     </View>
   );
 
+  const paymentBox = (
+    <View style={s.card}>
+      <SectionHeading
+        title="Payment method"
+        subtitle="Choose how you would like to pay."
+      />
+
+      <View style={s.paymentOptions}>
+        <Pressable
+          onPress={() => changePaymentMethod('cash')}
+          disabled={submitting}
+          accessibilityRole="radio"
+          accessibilityState={{ checked: paymentMethod === 'cash' }}
+          style={[
+            s.paymentOption,
+            paymentMethod === 'cash' && s.paymentOptionSelected,
+            web({ cursor: submitting ? 'not-allowed' : 'pointer' }),
+          ]}
+        >
+          <View
+            style={[
+              s.paymentRadio,
+              paymentMethod === 'cash' && s.paymentRadioSelected,
+            ]}
+          >
+            {paymentMethod === 'cash' && (
+              <View style={s.paymentRadioDot} />
+            )}
+          </View>
+
+          <View style={s.paymentOptionText}>
+            <Text style={s.paymentTitle}>Cash</Text>
+            <Text style={s.paymentDescription}>
+              Pay with cash when your order is served.
+            </Text>
+          </View>
+
+          <Text style={s.paymentIcon}>€</Text>
+        </Pressable>
+
+        <Pressable
+          onPress={() => changePaymentMethod('card')}
+          disabled={submitting}
+          accessibilityRole="radio"
+          accessibilityState={{ checked: paymentMethod === 'card' }}
+          style={[
+            s.paymentOption,
+            paymentMethod === 'card' && s.paymentOptionSelected,
+            web({ cursor: submitting ? 'not-allowed' : 'pointer' }),
+          ]}
+        >
+          <View
+            style={[
+              s.paymentRadio,
+              paymentMethod === 'card' && s.paymentRadioSelected,
+            ]}
+          >
+            {paymentMethod === 'card' && (
+              <View style={s.paymentRadioDot} />
+            )}
+          </View>
+
+          <View style={s.paymentOptionText}>
+            <Text style={s.paymentTitle}>Card</Text>
+            <Text style={s.paymentDescription}>
+              Use the virtual card form.
+            </Text>
+          </View>
+
+          <Text style={s.paymentIcon}>▰</Text>
+        </Pressable>
+      </View>
+
+      {paymentMethod === 'card' && (
+        <View style={s.cardForm}>
+          <View style={s.cardFormHeader}>
+            <Text style={s.cardFormTitle}>Card details</Text>
+            <Text style={s.demoBadge}>DEMO ONLY</Text>
+          </View>
+
+          <View style={s.virtualCard}>
+            <View style={s.virtualCardTop}>
+              <Text style={s.virtualCardBrand}>AMANT'S</Text>
+              <Text style={s.virtualCardChip}>▦</Text>
+            </View>
+
+            <Text
+              style={[
+                s.virtualCardNumber,
+                compact && s.virtualCardNumberCompact,
+              ]}
+            >
+              {cardNumber || '•••• •••• •••• ••••'}
+            </Text>
+
+            <View style={s.virtualCardBottom}>
+              <View style={s.virtualCardHolder}>
+                <Text style={s.virtualCardLabel}>CARDHOLDER</Text>
+                <Text style={s.virtualCardValue} numberOfLines={1}>
+                  {cardName.toUpperCase() || 'YOUR NAME'}
+                </Text>
+              </View>
+
+              <View>
+                <Text style={s.virtualCardLabel}>EXPIRES</Text>
+                <Text style={s.virtualCardValue}>
+                  {cardExpiry || 'MM/YY'}
+                </Text>
+              </View>
+            </View>
+          </View>
+
+          <Text style={s.cardFieldLabel}>Cardholder name</Text>
+          <TextInput
+            value={cardName}
+            onChangeText={setCardName}
+            placeholder="Demo cardholder"
+            placeholderTextColor="#A89C8D"
+            autoCapitalize="words"
+            autoCorrect={false}
+            editable={!submitting}
+            maxLength={60}
+            returnKeyType="next"
+            style={s.cardInput}
+          />
+
+          <Text style={s.cardFieldLabel}>Card number</Text>
+          <TextInput
+            value={cardNumber}
+            onChangeText={(value) =>
+              setCardNumber(formatCardNumber(value))
+            }
+            placeholder="Enter demo card number"
+            placeholderTextColor="#A89C8D"
+            keyboardType="number-pad"
+            maxLength={23}
+            editable={!submitting}
+            returnKeyType="next"
+            style={s.cardInput}
+          />
+
+          <View
+            style={[
+              s.cardInputRow,
+              compact && s.cardInputRowCompact,
+            ]}
+          >
+            <View style={s.cardInputColumn}>
+              <Text style={s.cardFieldLabel}>Expiry date</Text>
+              <TextInput
+                value={cardExpiry}
+                onChangeText={(value) =>
+                  setCardExpiry(formatExpiry(value))
+                }
+                placeholder="MM/YY"
+                placeholderTextColor="#A89C8D"
+                keyboardType="number-pad"
+                maxLength={5}
+                editable={!submitting}
+                returnKeyType="next"
+                style={s.cardInput}
+              />
+            </View>
+
+            <View style={s.cardInputColumn}>
+              <Text style={s.cardFieldLabel}>Security code</Text>
+              <TextInput
+                value={cardCvv}
+                onChangeText={(value) =>
+                  setCardCvv(value.replace(/\D/g, '').slice(0, 4))
+                }
+                placeholder="000"
+                placeholderTextColor="#A89C8D"
+                keyboardType="number-pad"
+                secureTextEntry
+                maxLength={4}
+                editable={!submitting}
+                returnKeyType="done"
+                onSubmitEditing={() => Keyboard.dismiss()}
+                style={s.cardInput}
+              />
+            </View>
+          </View>
+        </View>
+      )}
+    </View>
+  );
+
   const summaryCard = (
     <View style={[s.card, s.summaryCard]}>
       <SectionHeading title="Order summary" />
@@ -314,9 +621,7 @@ export default function CheckoutScreen({
       <View style={s.summaryTable}>
         <View style={s.summaryInfo}>
           <Text style={s.summaryInfoLabel}>YOUR TABLE</Text>
-          <Text style={s.summaryInfoValue}>
-            Table {pad(table.id)}
-          </Text>
+          <Text style={s.summaryInfoValue}>Table {pad(table.id)}</Text>
         </View>
 
         <View style={s.summaryInfo}>
@@ -342,6 +647,7 @@ export default function CheckoutScreen({
         loading={submitting}
         disabled={empty}
         onPress={place}
+        paymentMethod={paymentMethod}
       />
     </View>
   );
@@ -357,8 +663,7 @@ export default function CheckoutScreen({
     >
       <StatusBar barStyle="dark-content" />
 
-      {/* Header */}
-      <View style={s.header}>
+      <View style={[s.header, compact && s.headerCompact]}>
         <Pressable
           onPress={onBack}
           disabled={submitting}
@@ -366,17 +671,22 @@ export default function CheckoutScreen({
           accessibilityLabel="Back to menu"
           style={[
             s.back,
+            compact && s.backCompact,
             web({ cursor: submitting ? 'not-allowed' : 'pointer' }),
           ]}
         >
           <Text style={s.backArrow}>←</Text>
-          <Text style={s.backText}>Back to menu</Text>
+          {!smallPhone && <Text style={s.backText}>Back to menu</Text>}
         </Pressable>
 
-        <Text style={s.wordmark}>Amant's</Text>
+        <Text style={[s.wordmark, compact && s.wordmarkCompact]}>
+          Amant's
+        </Text>
 
         <View style={s.headerRight}>
-          <Text style={s.headerLabel}>CHECKOUT</Text>
+          <Text style={[s.headerLabel, compact && s.headerLabelCompact]}>
+            CHECKOUT
+          </Text>
         </View>
       </View>
 
@@ -385,18 +695,25 @@ export default function CheckoutScreen({
           s.scroll,
           {
             paddingHorizontal: pagePadding,
-            paddingBottom: wide || empty ? 48 : 170,
+            paddingBottom: wide ? 48 : keyboardVisible ? 40 : 150,
           },
         ]}
         keyboardShouldPersistTaps="handled"
+        keyboardDismissMode={
+          Platform.OS === 'ios' ? 'interactive' : 'on-drag'
+        }
         showsVerticalScrollIndicator={false}
       >
         <View style={s.page}>
-          {/* Page introduction */}
           <View style={s.intro}>
             <Text style={s.eyebrow}>ALMOST THERE</Text>
+
             <Text
-              style={[s.title, compact && s.titleCompact]}
+              style={[
+                s.title,
+                compact && s.titleCompact,
+                smallPhone && s.titleSmall,
+              ]}
               accessibilityRole="header"
             >
               Checkout
@@ -431,10 +748,7 @@ export default function CheckoutScreen({
               <Pressable
                 onPress={onBack}
                 accessibilityRole="button"
-                style={[
-                  s.emptyButton,
-                  web({ cursor: 'pointer' }),
-                ]}
+                style={[s.emptyButton, web({ cursor: 'pointer' })]}
               >
                 <Text style={s.emptyButtonText}>Browse the menu →</Text>
               </Pressable>
@@ -447,17 +761,17 @@ export default function CheckoutScreen({
                     {banner}
                     {items}
                     {noteBox}
+                    {paymentBox}
                   </View>
 
-                  <View style={s.sideColumn}>
-                    {summaryCard}
-                  </View>
+                  <View style={s.sideColumn}>{summaryCard}</View>
                 </View>
               ) : (
                 <View>
                   {banner}
                   {items}
                   {noteBox}
+                  {paymentBox}
 
                   <View style={s.mobileSummary}>
                     <SectionHeading title="Order summary" />
@@ -477,8 +791,7 @@ export default function CheckoutScreen({
         </View>
       </ScrollView>
 
-      {/* Mobile and tablet sticky checkout bar */}
-      {!wide && !empty && (
+      {!wide && !empty && !keyboardVisible && (
         <View style={s.sticky}>
           <View style={s.stickyInner}>
             <View style={s.stickyTotal}>
@@ -493,6 +806,7 @@ export default function CheckoutScreen({
                 loading={submitting}
                 disabled={empty}
                 onPress={place}
+                paymentMethod={paymentMethod}
               />
             </View>
           </View>
@@ -508,7 +822,6 @@ const s = StyleSheet.create({
     backgroundColor: C.cream,
   },
 
-  // Header
   header: {
     minHeight: 66,
     flexDirection: 'row',
@@ -521,11 +834,21 @@ const s = StyleSheet.create({
     backgroundColor: '#FBF8F2',
   },
 
+  headerCompact: {
+    paddingHorizontal: 12,
+    minHeight: 58,
+  },
+
   back: {
     flexDirection: 'row',
     alignItems: 'center',
     paddingVertical: 8,
-    minWidth: 110,
+    flex: 1,
+    minWidth: 0,
+  },
+
+  backCompact: {
+    flex: 1,
   },
 
   backArrow: {
@@ -546,8 +869,12 @@ const s = StyleSheet.create({
     color: C.espresso,
   },
 
+  wordmarkCompact: {
+    fontSize: 20,
+  },
+
   headerRight: {
-    minWidth: 110,
+    flex: 1,
     alignItems: 'flex-end',
   },
 
@@ -558,7 +885,11 @@ const s = StyleSheet.create({
     color: C.gold,
   },
 
-  // Main page
+  headerLabelCompact: {
+    fontSize: 8,
+    letterSpacing: 1,
+  },
+
   scroll: {
     flexGrow: 1,
     alignItems: 'center',
@@ -590,6 +921,10 @@ const s = StyleSheet.create({
 
   titleCompact: {
     fontSize: 36,
+  },
+
+  titleSmall: {
+    fontSize: 32,
   },
 
   subtitle: {
@@ -628,7 +963,6 @@ const s = StyleSheet.create({
     color: C.espresso,
   },
 
-  // Layout
   desktopLayout: {
     flexDirection: 'row',
     alignItems: 'flex-start',
@@ -645,7 +979,6 @@ const s = StyleSheet.create({
     minWidth: 0,
   },
 
-  // Cards
   card: {
     backgroundColor: '#FBF8F2',
     borderRadius: 18,
@@ -677,7 +1010,6 @@ const s = StyleSheet.create({
     lineHeight: 18,
   },
 
-  // Order items
   line: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -695,6 +1027,7 @@ const s = StyleSheet.create({
   thumb: {
     borderRadius: 12,
     backgroundColor: '#EFE8DD',
+    flexShrink: 0,
   },
 
   itemDetails: {
@@ -741,7 +1074,6 @@ const s = StyleSheet.create({
     flexShrink: 0,
   },
 
-  // Kitchen note
   noteInput: {
     minHeight: 92,
     borderWidth: 1,
@@ -769,6 +1101,7 @@ const s = StyleSheet.create({
     fontFamily: 'Inter_400Regular',
     fontSize: 11.5,
     color: '#897B6D',
+    flexShrink: 1,
   },
 
   characterCount: {
@@ -777,17 +1110,249 @@ const s = StyleSheet.create({
     color: '#A89C8D',
   },
 
-  // Summary
+  paymentOptions: {
+    gap: 10,
+  },
+
+  paymentOption: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    minHeight: 76,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    borderWidth: 1,
+    borderColor: C.beige,
+    borderRadius: 13,
+    backgroundColor: '#FFFFFF',
+    gap: 12,
+  },
+
+  paymentOptionSelected: {
+    borderColor: C.gold,
+    backgroundColor: '#F7F0E5',
+  },
+
+  paymentRadio: {
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    borderWidth: 1.5,
+    borderColor: '#B9AA98',
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexShrink: 0,
+  },
+
+  paymentRadioSelected: {
+    borderColor: C.gold,
+  },
+
+  paymentRadioDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    backgroundColor: C.gold,
+  },
+
+  paymentOptionText: {
+    flex: 1,
+    minWidth: 0,
+  },
+
+  paymentTitle: {
+    fontFamily: 'Inter_600SemiBold',
+    fontSize: 14,
+    color: C.espresso,
+  },
+
+  paymentDescription: {
+    fontFamily: 'Inter_400Regular',
+    fontSize: 11.5,
+    color: '#897B6D',
+    marginTop: 4,
+    lineHeight: 16,
+    flexShrink: 1,
+  },
+
+  paymentIcon: {
+    fontFamily: 'Inter_600SemiBold',
+    fontSize: 20,
+    color: C.gold,
+    paddingHorizontal: 5,
+  },
+
+  cardForm: {
+    marginTop: 20,
+    paddingTop: 18,
+    borderTopWidth: 1,
+    borderTopColor: C.beige,
+  },
+
+  cardFormHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 15,
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+
+  cardFormTitle: {
+    fontFamily: 'PlayfairDisplay_600SemiBold',
+    fontSize: 19,
+    color: C.espresso,
+  },
+
+  demoBadge: {
+    fontFamily: 'Inter_600SemiBold',
+    fontSize: 9,
+    letterSpacing: 1,
+    color: '#65805B',
+    backgroundColor: '#E7EFE1',
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 20,
+  },
+
+  virtualCard: {
+    backgroundColor: '#292D43',
+    borderRadius: 16,
+    padding: 19,
+    marginBottom: 20,
+    minHeight: 180,
+    justifyContent: 'space-between',
+    width: '100%',
+  },
+
+  virtualCardTop: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+
+  virtualCardBrand: {
+    fontFamily: 'Inter_600SemiBold',
+    fontSize: 13,
+    letterSpacing: 2,
+    color: '#FFFFFF',
+  },
+
+  virtualCardChip: {
+    fontSize: 25,
+    color: '#D7C18F',
+  },
+
+  virtualCardNumber: {
+    fontFamily: 'Inter_600SemiBold',
+    fontSize: 19,
+    letterSpacing: 2,
+    color: '#FFFFFF',
+    marginVertical: 18,
+  },
+
+  virtualCardNumberCompact: {
+    fontSize: 15,
+    letterSpacing: 1,
+  },
+
+  virtualCardBottom: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-end',
+  },
+
+  virtualCardHolder: {
+    flex: 1,
+    paddingRight: 12,
+    minWidth: 0,
+  },
+
+  virtualCardLabel: {
+    fontFamily: 'Inter_400Regular',
+    fontSize: 8,
+    letterSpacing: 1.3,
+    color: '#B9B8C8',
+    marginBottom: 5,
+  },
+
+  virtualCardValue: {
+    fontFamily: 'Inter_600SemiBold',
+    fontSize: 11,
+    color: '#FFFFFF',
+  },
+
+  cardFieldLabel: {
+    fontFamily: 'Inter_600SemiBold',
+    fontSize: 12,
+    color: C.espresso,
+    marginBottom: 7,
+    marginTop: 12,
+  },
+
+  cardInput: {
+    minHeight: 48,
+    borderWidth: 1,
+    borderColor: C.beige,
+    borderRadius: 11,
+    backgroundColor: '#FFFFFF',
+    paddingHorizontal: 13,
+    fontFamily: 'Inter_400Regular',
+    fontSize: 14,
+    color: C.espresso,
+    width: '100%',
+    ...(Platform.OS === 'web' ? { outlineStyle: 'none' } : null),
+  },
+
+  cardInputRow: {
+    flexDirection: 'row',
+    gap: 12,
+  },
+
+  cardInputRowCompact: {
+    flexDirection: 'column',
+    gap: 0,
+  },
+
+  cardInputColumn: {
+    flex: 1,
+    minWidth: 0,
+  },
+
+  demoNotice: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    backgroundColor: '#F0E6D8',
+    padding: 12,
+    borderRadius: 10,
+    marginTop: 16,
+    gap: 9,
+  },
+
+  demoNoticeIcon: {
+    fontSize: 15,
+    color: C.gold,
+  },
+
+  demoNoticeText: {
+    flex: 1,
+    fontFamily: 'Inter_400Regular',
+    fontSize: 11,
+    lineHeight: 17,
+    color: '#796B5D',
+  },
+
   summaryTable: {
     flexDirection: 'row',
     backgroundColor: '#F4EDE2',
     borderRadius: 12,
     padding: 13,
     marginBottom: 18,
+    gap: 10,
   },
 
   summaryInfo: {
     flex: 1,
+    minWidth: 0,
   },
 
   summaryInfoLabel: {
@@ -829,6 +1394,7 @@ const s = StyleSheet.create({
     fontFamily: 'Inter_500Medium',
     fontSize: 13.5,
     color: C.espresso,
+    flexShrink: 0,
   },
 
   totalRow: {
@@ -840,6 +1406,11 @@ const s = StyleSheet.create({
     borderTopWidth: 1,
     borderTopColor: C.beige,
     gap: 10,
+  },
+
+  totalDetails: {
+    flex: 1,
+    minWidth: 0,
   },
 
   totalLabel: {
@@ -859,6 +1430,7 @@ const s = StyleSheet.create({
     fontFamily: 'Inter_600SemiBold',
     fontSize: 20,
     color: C.espresso,
+    flexShrink: 0,
   },
 
   mobileSummary: {
@@ -889,6 +1461,7 @@ const s = StyleSheet.create({
     textAlign: 'center',
     textAlignVertical: 'center',
     overflow: 'hidden',
+    flexShrink: 0,
   },
 
   secureText: {
@@ -899,7 +1472,6 @@ const s = StyleSheet.create({
     lineHeight: 16,
   },
 
-  // Place order button
   place: {
     minHeight: 54,
     width: '100%',
@@ -907,7 +1479,7 @@ const s = StyleSheet.create({
     backgroundColor: C.gold,
     alignItems: 'center',
     justifyContent: 'center',
-    paddingHorizontal: 18,
+    paddingHorizontal: 12,
     shadowColor: C.espresso,
     shadowOpacity: 0.13,
     shadowRadius: 9,
@@ -931,9 +1503,11 @@ const s = StyleSheet.create({
 
   placeText: {
     fontFamily: 'Inter_600SemiBold',
-    fontSize: 15,
+    fontSize: 14,
     color: C.espresso,
     letterSpacing: 0.2,
+    textAlign: 'center',
+    flexShrink: 1,
   },
 
   disabledText: {
@@ -944,7 +1518,7 @@ const s = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 12,
+    gap: 8,
   },
 
   buttonArrow: {
@@ -955,10 +1529,10 @@ const s = StyleSheet.create({
   loadingContent: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 10,
+    justifyContent: 'center',
+    gap: 8,
   },
 
-  // Sticky mobile bar
   sticky: {
     position: 'absolute',
     left: 0,
@@ -967,9 +1541,9 @@ const s = StyleSheet.create({
     backgroundColor: '#FBF8F2',
     borderTopWidth: 1,
     borderTopColor: C.beige,
-    paddingHorizontal: 18,
-    paddingTop: 12,
-    paddingBottom: Platform.OS === 'ios' ? 26 : 14,
+    paddingHorizontal: 14,
+    paddingTop: 10,
+    paddingBottom: Platform.OS === 'ios' ? 22 : 12,
   },
 
   stickyInner: {
@@ -979,7 +1553,7 @@ const s = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    gap: 16,
+    gap: 12,
   },
 
   stickyTotal: {
@@ -990,7 +1564,7 @@ const s = StyleSheet.create({
   stickyLabel: {
     fontFamily: 'Inter_600SemiBold',
     fontSize: 9,
-    letterSpacing: 1.4,
+    letterSpacing: 1.2,
     color: '#99846A',
     marginBottom: 4,
   },
@@ -1002,11 +1576,11 @@ const s = StyleSheet.create({
   },
 
   stickyButton: {
-    flex: 1.1,
+    flex: 1.2,
     maxWidth: 260,
+    minWidth: 0,
   },
 
-  // Error banner
   problem: {
     borderWidth: 1,
     borderColor: '#D9A18B',
@@ -1040,6 +1614,7 @@ const s = StyleSheet.create({
     fontFamily: 'Inter_600SemiBold',
     fontSize: 12.5,
     color: C.terracotta,
+    flexShrink: 1,
   },
 
   problemText: {
@@ -1066,7 +1641,6 @@ const s = StyleSheet.create({
     color: C.espresso,
   },
 
-  // Empty cart
   emptyBox: {
     alignItems: 'center',
     justifyContent: 'center',
