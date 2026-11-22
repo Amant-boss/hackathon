@@ -5,7 +5,7 @@ import { Alert } from 'react-native';
 import TablesScreen from './TablesScreen';
 import MenuScreen from './MenuScreen';
 import CheckoutScreen from './CheckoutScreen';
-import AdminAuth from './AdminAuth';
+import AdminAuth from './adminAuth';
 import AdminDashboard from './AdminDashboard';
 
 import { cartReducer, initialCart } from './cartLogic';

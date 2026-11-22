@@ -1,6 +1,5 @@
-
-// MenuScreen.js — Page 3: the digital menu.
-// Data comes from menuService (local SQLite today, FastAPI later).
+// MenuScreen.js — Page 3: Digital menu + AI restaurant assistant.
+// Connected to the FastAPI/Gemini backend.
 // Responsive for desktop, tablet and mobile.
 
 import React, {
@@ -12,8 +11,11 @@ import React, {
 } from 'react';
 
 import {
+  ActivityIndicator,
   Animated,
   Easing,
+  KeyboardAvoidingView,
+  Modal,
   Platform,
   Pressable,
   SafeAreaView,
@@ -34,6 +36,18 @@ import { allergenSummary } from './allergens';
 import { FoodImage, web } from './menuUi';
 import ProductModal from './ProductModal';
 import CartDrawer from './CartDrawer';
+import { SEED_PRODUCTS } from './menuData';
+
+// IMPORTANT:
+// This is your computer's LAN IP.
+// Your phone and computer must be connected to the same Wi-Fi.
+// (Optional) set EXPO_PUBLIC_CHAT_API_URL to override, e.g. http://10.0.2.2:8000/chat
+// for the Android emulator.
+const CHAT_API_URL =
+  process.env.EXPO_PUBLIC_CHAT_API_URL ||
+  (Platform.OS === 'web'
+    ? 'http://127.0.0.1:8000/chat'
+    : 'http://192.168.178.78:8000/chat');
 
 const pad = (n) => String(n).padStart(2, '0');
 
@@ -479,6 +493,425 @@ function SearchBar({ value, onChange, style }) {
   );
 }
 
+// ---------- chatbot message ----------
+function ChatMessage({ item, onAdd }) {
+  const isUser = item.role === 'user';
+
+  return (
+    <View
+      style={[
+        s.chatMessageRow,
+        isUser && s.chatMessageRowUser,
+      ]}
+    >
+      {!isUser && (
+        <View style={s.chatBotAvatar}>
+          <Text style={s.chatBotAvatarText}>A</Text>
+        </View>
+      )}
+
+      <View
+        style={[
+          s.chatBubble,
+          isUser ? s.chatUserBubble : s.chatAssistantBubble,
+        ]}
+      >
+        <Text
+          style={[
+            s.chatMessageText,
+            isUser && s.chatUserText,
+          ]}
+        >
+          {item.text}
+        </Text>
+
+        {!!item.recommendations?.length && (
+          <View style={s.chatRecommendations}>
+            <Text style={s.chatRecommendationHeading}>
+              Recommended for you
+            </Text>
+
+            {item.recommendations.map((product) => (
+              <View
+                key={product.id}
+                style={s.chatProductCard}
+              >
+                <View style={s.chatProductInfo}>
+                  <Text style={s.chatProductName}>
+                    {product.name}
+                  </Text>
+                  <Text style={s.chatProductPrice}>
+                    {formatPrice(product.priceCents)}
+                  </Text>
+                </View>
+
+                <Pressable
+                  onPress={() => onAdd(product)}
+                  disabled={!product.available}
+                  style={[
+                    s.chatAddButton,
+                    !product.available && s.chatAddButtonDisabled,
+                  ]}
+                >
+                  <Text style={s.chatAddButtonText}>
+                    {product.available ? 'Add +' : 'Unavailable'}
+                  </Text>
+                </Pressable>
+              </View>
+            ))}
+          </View>
+        )}
+      </View>
+    </View>
+  );
+}
+
+// ---------- chatbot ----------
+function Chatbot({
+  visible,
+  onClose,
+  products,
+  onAdd,
+  layout,
+  width,
+  height,
+}) {
+  const [input, setInput] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [messages, setMessages] = useState([
+    {
+      id: 'welcome',
+      role: 'assistant',
+      text: "Hello! Welcome to Amant's Restaurant. I'm your menu assistant. Ask me about our dishes, ingredients, prices, or what you might enjoy!",
+    },
+  ]);
+
+  const chatScrollRef = useRef(null);
+  const requestLock = useRef(false);
+
+  useEffect(() => {
+    if (visible) {
+      const timer = setTimeout(() => {
+        chatScrollRef.current?.scrollToEnd({ animated: true });
+      }, 150);
+
+      return () => clearTimeout(timer);
+    }
+  }, [messages, visible, loading]);
+
+  const sendMessage = useCallback(async (textOverride) => {
+    const message = (textOverride ?? input).trim();
+
+    if (!message || requestLock.current || loading) return;
+
+    requestLock.current = true;
+    setLoading(true);
+    setInput('');
+
+    let controller;
+    let timeoutId;
+
+    const userMessage = {
+      id: `user-${Date.now()}`,
+      role: 'user',
+      text: message,
+    };
+
+    const previousMessages = messages.filter(
+      (m) => m.role === 'user' || m.role === 'assistant'
+    );
+
+    setMessages((current) => [
+      ...current,
+      userMessage,
+    ]);
+
+    try {
+      const history = previousMessages
+        .filter((m) => m.id !== 'welcome')
+        .slice(-12)
+        .map((m) => ({
+          role: m.role,
+          content: m.text,
+        }));
+
+      controller = new AbortController();
+      timeoutId = setTimeout(() => controller.abort(), 60000);
+
+      const response = await fetch(CHAT_API_URL, {
+        method: 'POST',
+        signal: controller.signal,
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+        },
+        body: JSON.stringify({
+          message,
+          menu: SEED_PRODUCTS,
+          history,
+        }),
+      });
+
+      if (!response.ok) {
+        let detail = '';
+
+        try {
+          const errorData = await response.json();
+          detail = errorData.detail || errorData.message || '';
+        } catch (_) {
+          // The server did not return JSON.
+        }
+
+        throw new Error(
+          detail || `Server returned error ${response.status}`
+        );
+      }
+
+      const data = await response.json();
+
+      if (!data || typeof data.reply !== 'string') {
+        throw new Error('The chatbot returned an invalid response.');
+      }
+
+      // Backend returns exact product names.
+      // Match them to the actual SQLite menu products so Add to Cart
+      // uses the real product ID, price and image.
+      const recommendationNames = Array.isArray(data.recommendations)
+        ? data.recommendations
+        : [];
+
+      const recommendedProducts = recommendationNames
+        .map((name) => {
+          if (typeof name !== 'string') return null;
+
+          return products.find(
+            (product) =>
+              product.name?.trim().toLowerCase() ===
+              name.trim().toLowerCase()
+          );
+        })
+        .filter((product) => product && product.available)
+        .filter(
+          (product, index, array) =>
+            array.findIndex((p) => p.id === product.id) === index
+        );
+
+      setMessages((current) => [
+        ...current,
+        {
+          id: `assistant-${Date.now()}`,
+          role: 'assistant',
+          text: data.reply,
+          recommendations: recommendedProducts,
+        },
+      ]);
+    } catch (error) {
+      console.error('Chatbot request failed:', error);
+
+      let errorText =
+        "I couldn't reach the restaurant assistant right now.";
+
+      if (error.name === 'AbortError') {
+        errorText =
+          'The assistant took too long to answer. Please try again.';
+      } else if (
+        error.message?.includes('Network request failed') ||
+        error.message?.includes('Failed to fetch')
+      ) {
+        errorText =
+          "I can't connect to the restaurant server. Please check that the backend is running and your phone and computer are connected to the same Wi-Fi.";
+      } else if (error.message) {
+        errorText = `Something went wrong: ${error.message}`;
+      }
+
+      setMessages((current) => [
+        ...current,
+        {
+          id: `error-${Date.now()}`,
+          role: 'assistant',
+          text: errorText,
+        },
+      ]);
+    } finally {
+      clearTimeout(timeoutId);
+      setLoading(false);
+      requestLock.current = false;
+    }
+  }, [input, loading, messages, products]);
+
+  const suggestions = [
+    'What do you recommend?',
+    'Show me vegetarian dishes',
+    'What is the cheapest main?',
+    'Tell me about the pizzas',
+  ];
+
+  const chatWidth =
+    layout === 'mobile'
+      ? Math.min(width - 24, 460)
+      : 420;
+
+  const chatHeight =
+    layout === 'mobile'
+      ? Math.min(height * 0.78, 680)
+      : Math.min(height - 100, 650);
+
+  return (
+    <>
+      <Pressable
+        onPress={onClose}
+        style={s.chatBackdrop}
+        accessibilityLabel="Close chat"
+      />
+
+      <KeyboardAvoidingView
+        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+        style={s.chatKeyboardContainer}
+        pointerEvents="box-none"
+      >
+        <View
+          style={[
+            s.chatWindow,
+            {
+              width: chatWidth,
+              height: chatHeight,
+              maxHeight: height - 30,
+            },
+          ]}
+        >
+          <View style={s.chatHeader}>
+            <View style={s.chatHeaderLeft}>
+              <View style={s.chatHeaderAvatar}>
+                <Text style={s.chatHeaderAvatarText}>A</Text>
+              </View>
+
+              <View style={s.chatHeaderText}>
+                <Text style={s.chatTitle}>Restaurant Assistant</Text>
+                <View style={s.chatOnlineRow}>
+                  <View style={s.chatOnlineDot} />
+                  <Text style={s.chatOnlineText}>
+                    Here to help
+                  </Text>
+                </View>
+              </View>
+            </View>
+
+            <Pressable
+              onPress={onClose}
+              hitSlop={12}
+              style={s.chatCloseButton}
+              accessibilityRole="button"
+              accessibilityLabel="Close assistant"
+            >
+              <Text style={s.chatCloseText}>✕</Text>
+            </Pressable>
+          </View>
+
+          <View style={s.chatIntro}>
+            <Text style={s.chatIntroTitle}>
+              What can I help you find?
+            </Text>
+            <Text style={s.chatIntroSubtitle}>
+              Ask me anything about our menu.
+            </Text>
+          </View>
+
+          <ScrollView
+            ref={chatScrollRef}
+            style={s.chatMessagesScroll}
+            contentContainerStyle={s.chatMessagesContent}
+            keyboardShouldPersistTaps="handled"
+            showsVerticalScrollIndicator={false}
+          >
+            {messages.map((item) => (
+              <ChatMessage
+                key={item.id}
+                item={item}
+                onAdd={onAdd}
+              />
+            ))}
+
+            {loading && (
+              <View style={s.chatLoadingRow}>
+                <View style={s.chatBotAvatar}>
+                  <Text style={s.chatBotAvatarText}>A</Text>
+                </View>
+
+                <View style={s.chatTypingBubble}>
+                  <ActivityIndicator
+                    size="small"
+                    color={C.gold}
+                  />
+                  <Text style={s.chatTypingText}>
+                    Thinking...
+                  </Text>
+                </View>
+              </View>
+            )}
+          </ScrollView>
+
+          {messages.length <= 1 && (
+            <View style={s.chatSuggestions}>
+              <Text style={s.chatSuggestionsTitle}>
+                QUICK QUESTIONS
+              </Text>
+
+              <View style={s.chatSuggestionList}>
+                {suggestions.map((suggestion) => (
+                  <Pressable
+                    key={suggestion}
+                    onPress={() => sendMessage(suggestion)}
+                    disabled={loading}
+                    style={s.chatSuggestion}
+                  >
+                    <Text style={s.chatSuggestionText}>
+                      {suggestion}
+                    </Text>
+                  </Pressable>
+                ))}
+              </View>
+            </View>
+          )}
+
+          <View style={s.chatInputArea}>
+            <TextInput
+              value={input}
+              onChangeText={setInput}
+              placeholder="Ask about our menu..."
+              placeholderTextColor="#9A8C7D"
+              style={s.chatInput}
+              multiline
+              maxLength={1000}
+              editable={!loading}
+              returnKeyType="send"
+              blurOnSubmit={false}
+              onSubmitEditing={() => sendMessage()}
+              accessibilityLabel="Message the restaurant assistant"
+            />
+
+            <Pressable
+              onPress={() => sendMessage()}
+              disabled={!input.trim() || loading}
+              style={[
+                s.chatSendButton,
+                (!input.trim() || loading) && s.chatSendButtonDisabled,
+              ]}
+              accessibilityRole="button"
+              accessibilityLabel="Send message"
+            >
+              <Text style={s.chatSendText}>↑</Text>
+            </Pressable>
+          </View>
+
+          <Text style={s.chatDisclaimer}>
+            Menu information is provided as a guide. Please confirm allergies with staff.
+          </Text>
+        </View>
+      </KeyboardAvoidingView>
+    </>
+  );
+}
+
 // ---------- screen ----------
 export default function MenuScreen({
   user,
@@ -531,8 +964,6 @@ export default function MenuScreen({
         ? (contentWidth - 20) / 2
         : contentWidth;
 
-  // Shorter images on smaller screens.
-  // Heights are calculated from the actual card width.
   const cardImageHeight = Math.round(
     layout === 'mobile'
       ? clamp(cardWidth * 0.34, 88, 116)
@@ -559,6 +990,7 @@ export default function MenuScreen({
   const [cartOpen, setCartOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [toast, setToast] = useState(null);
+  const [chatOpen, setChatOpen] = useState(false);
 
   const toastId = useRef(0);
   const enter = useRef(new Animated.Value(0)).current;
@@ -1132,6 +1564,52 @@ export default function MenuScreen({
           }}
         />
       )}
+
+      {/* Floating chatbot launcher */}
+      {!chatOpen && (
+        <Pressable
+          onPress={() => setChatOpen(true)}
+          style={[
+            s.chatLauncher,
+            showStickyBar && s.chatLauncherAboveCart,
+            web({
+              cursor: 'pointer',
+              transitionDuration: '180ms',
+            }),
+          ]}
+          accessibilityRole="button"
+          accessibilityLabel="Open restaurant assistant"
+        >
+          <Text style={s.chatLauncherIcon}>✦</Text>
+
+          {layout !== 'mobile' && (
+            <Text style={s.chatLauncherText}>
+              Ask our assistant
+            </Text>
+          )}
+        </Pressable>
+      )}
+
+      {/* Chatbot window */}
+      <Modal
+        visible={chatOpen}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setChatOpen(false)}
+        statusBarTranslucent
+      >
+        <View style={s.chatModalRoot}>
+          <Chatbot
+            visible={chatOpen}
+            onClose={() => setChatOpen(false)}
+            products={menu.products}
+            onAdd={addToCart}
+            layout={layout}
+            width={width}
+            height={height}
+          />
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -1939,5 +2417,430 @@ const s = StyleSheet.create({
     fontSize: 14,
     color: C.cream,
     textAlign: 'center',
+  },
+
+  // Chat launcher
+  chatLauncher: {
+    position: 'absolute',
+    right: 20,
+    bottom: 22,
+    minHeight: 58,
+    minWidth: 58,
+    paddingHorizontal: 17,
+    borderRadius: 30,
+    backgroundColor: C.espresso,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#000',
+    shadowOpacity: 0.24,
+    shadowRadius: 12,
+    shadowOffset: {
+      width: 0,
+      height: 5,
+    },
+    elevation: 9,
+    zIndex: 50,
+  },
+
+  chatLauncherAboveCart: {
+    bottom: 88,
+  },
+
+  chatLauncherIcon: {
+    fontSize: 23,
+    color: C.gold,
+    marginRight: 8,
+  },
+
+  chatLauncherText: {
+    fontFamily: 'Inter_600SemiBold',
+    fontSize: 14,
+    color: C.cream,
+  },
+
+  // Chat modal
+  chatModalRoot: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+
+  chatBackdrop: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(31, 23, 17, 0.48)',
+  },
+
+  chatKeyboardContainer: {
+    flex: 1,
+    width: '100%',
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingVertical: 12,
+  },
+
+  chatWindow: {
+    backgroundColor: '#FBF8F2',
+    borderRadius: 24,
+    overflow: 'hidden',
+    borderWidth: 1,
+    borderColor: C.beige,
+    shadowColor: '#000',
+    shadowOpacity: 0.25,
+    shadowRadius: 22,
+    shadowOffset: {
+      width: 0,
+      height: 10,
+    },
+    elevation: 15,
+  },
+
+  chatHeader: {
+    minHeight: 76,
+    paddingHorizontal: 18,
+    paddingVertical: 13,
+    backgroundColor: C.espresso,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+
+  chatHeaderLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flex: 1,
+  },
+
+  chatHeaderAvatar: {
+    width: 43,
+    height: 43,
+    borderRadius: 22,
+    backgroundColor: '#F0E6D8',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 12,
+  },
+
+  chatHeaderAvatarText: {
+    fontFamily: 'PlayfairDisplay_600SemiBold',
+    fontSize: 21,
+    color: C.espresso,
+  },
+
+  chatHeaderText: {
+    flex: 1,
+  },
+
+  chatTitle: {
+    fontFamily: 'Inter_600SemiBold',
+    fontSize: 15,
+    color: C.cream,
+  },
+
+  chatOnlineRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 5,
+  },
+
+  chatOnlineDot: {
+    width: 7,
+    height: 7,
+    borderRadius: 4,
+    backgroundColor: '#9BC49A',
+    marginRight: 6,
+  },
+
+  chatOnlineText: {
+    fontFamily: 'Inter_400Regular',
+    fontSize: 11.5,
+    color: '#D7C7B4',
+  },
+
+  chatCloseButton: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: 'rgba(255,255,255,0.12)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginLeft: 10,
+  },
+
+  chatCloseText: {
+    color: C.cream,
+    fontSize: 18,
+  },
+
+  chatIntro: {
+    paddingHorizontal: 18,
+    paddingTop: 16,
+    paddingBottom: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: '#EADFCE',
+  },
+
+  chatIntroTitle: {
+    fontFamily: 'PlayfairDisplay_600SemiBold',
+    fontSize: 19,
+    color: C.espresso,
+  },
+
+  chatIntroSubtitle: {
+    fontFamily: 'Inter_400Regular',
+    fontSize: 12.5,
+    color: '#7A6A5C',
+    marginTop: 3,
+  },
+
+  chatMessagesScroll: {
+    flex: 1,
+    minHeight: 0,
+  },
+
+  chatMessagesContent: {
+    padding: 15,
+    paddingBottom: 20,
+  },
+
+  chatMessageRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-end',
+    marginBottom: 13,
+  },
+
+  chatMessageRowUser: {
+    justifyContent: 'flex-end',
+  },
+
+  chatBotAvatar: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: '#EDE1D1',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 8,
+    marginBottom: 3,
+    flexShrink: 0,
+  },
+
+  chatBotAvatarText: {
+    fontFamily: 'PlayfairDisplay_600SemiBold',
+    fontSize: 14,
+    color: C.espresso,
+  },
+
+  chatBubble: {
+    maxWidth: '84%',
+    borderRadius: 17,
+    paddingHorizontal: 13,
+    paddingVertical: 11,
+  },
+
+  chatAssistantBubble: {
+    backgroundColor: '#FFFFFF',
+    borderWidth: 1,
+    borderColor: '#EADFCE',
+    borderBottomLeftRadius: 5,
+  },
+
+  chatUserBubble: {
+    backgroundColor: C.espresso,
+    borderBottomRightRadius: 5,
+  },
+
+  chatMessageText: {
+    fontFamily: 'Inter_400Regular',
+    fontSize: 13,
+    lineHeight: 20,
+    color: '#4E4238',
+  },
+
+  chatUserText: {
+    color: '#FFFFFF',
+  },
+
+  chatRecommendations: {
+    marginTop: 13,
+    width: '100%',
+  },
+
+  chatRecommendationHeading: {
+    fontFamily: 'Inter_600SemiBold',
+    fontSize: 12,
+    color: C.espresso,
+    marginBottom: 8,
+  },
+
+  chatProductCard: {
+    backgroundColor: '#FBF8F2',
+    borderWidth: 1,
+    borderColor: '#EADFCE',
+    borderRadius: 12,
+    padding: 10,
+    marginTop: 7,
+  },
+
+  chatProductInfo: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 8,
+    gap: 8,
+  },
+
+  chatProductName: {
+    flex: 1,
+    fontFamily: 'Inter_600SemiBold',
+    fontSize: 12.5,
+    color: C.espresso,
+  },
+
+  chatProductPrice: {
+    fontFamily: 'Inter_600SemiBold',
+    fontSize: 12.5,
+    color: C.gold,
+  },
+
+  chatAddButton: {
+    minHeight: 34,
+    backgroundColor: C.gold,
+    borderRadius: 9,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 12,
+  },
+
+  chatAddButtonDisabled: {
+    backgroundColor: C.beige,
+  },
+
+  chatAddButtonText: {
+    fontFamily: 'Inter_600SemiBold',
+    fontSize: 12,
+    color: C.espresso,
+  },
+
+  chatLoadingRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-end',
+    marginBottom: 12,
+  },
+
+  chatTypingBubble: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#FFFFFF',
+    borderWidth: 1,
+    borderColor: '#EADFCE',
+    borderRadius: 15,
+    paddingHorizontal: 13,
+    paddingVertical: 11,
+  },
+
+  chatTypingText: {
+    fontFamily: 'Inter_400Regular',
+    fontSize: 12,
+    color: '#7A6A5C',
+    marginLeft: 8,
+  },
+
+  chatSuggestions: {
+    paddingHorizontal: 15,
+    paddingTop: 8,
+    paddingBottom: 12,
+    borderTopWidth: 1,
+    borderTopColor: '#EADFCE',
+  },
+
+  chatSuggestionsTitle: {
+    fontFamily: 'Inter_600SemiBold',
+    fontSize: 10,
+    letterSpacing: 1.1,
+    color: '#8A7E72',
+    marginBottom: 9,
+  },
+
+  chatSuggestionList: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 7,
+  },
+
+  chatSuggestion: {
+    borderWidth: 1,
+    borderColor: C.gold,
+    borderRadius: 20,
+    paddingHorizontal: 11,
+    paddingVertical: 8,
+    backgroundColor: '#FFFFFF',
+  },
+
+  chatSuggestionText: {
+    fontFamily: 'Inter_500Medium',
+    fontSize: 11.5,
+    color: C.espresso,
+  },
+
+  chatInputArea: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginHorizontal: 13,
+    marginTop: 8,
+    marginBottom: 7,
+    paddingLeft: 13,
+    paddingRight: 6,
+    minHeight: 48,
+    maxHeight: 100,
+    backgroundColor: '#FFFFFF',
+    borderWidth: 1,
+    borderColor: '#E3D6C5',
+    borderRadius: 15,
+  },
+
+  chatInput: {
+    flex: 1,
+    minHeight: 42,
+    maxHeight: 86,
+    paddingTop: 11,
+    paddingBottom: 9,
+    fontFamily: 'Inter_400Regular',
+    fontSize: 13,
+    color: C.espresso,
+    ...(Platform.OS === 'web'
+      ? { outlineStyle: 'none' }
+      : null),
+  },
+
+  chatSendButton: {
+    width: 36,
+    height: 36,
+    borderRadius: 12,
+    backgroundColor: C.espresso,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginLeft: 7,
+  },
+
+  chatSendButtonDisabled: {
+    backgroundColor: '#C9BDAE',
+  },
+
+  chatSendText: {
+    fontFamily: 'Inter_600SemiBold',
+    fontSize: 22,
+    color: '#FFFFFF',
+    lineHeight: 25,
+  },
+
+  chatDisclaimer: {
+    fontFamily: 'Inter_400Regular',
+    fontSize: 9.5,
+    lineHeight: 14,
+    color: '#8A7E72',
+    textAlign: 'center',
+    paddingHorizontal: 12,
+    paddingBottom: 10,
   },
 });

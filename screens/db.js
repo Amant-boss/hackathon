@@ -138,6 +138,44 @@ export function getDb() {
 
       await seedTables(db);
       await seedMenu(db);
+      await migrateSeedProductImages(db);
+      await migrateCocaColaImage(db);
+      async function migrateSeedProductImages(db) {
+  const migrationKey = 'update_seed_product_images_v1';
+
+  const existing = await db.getFirstAsync(
+    `SELECT migration_key
+     FROM app_migrations
+     WHERE migration_key = ?`,
+    [migrationKey]
+  );
+
+  if (existing) return;
+
+  await db.withTransactionAsync(async () => {
+    for (const product of SEED_PRODUCTS) {
+      if (!product.image) continue;
+
+      await db.runAsync(
+        `UPDATE products
+         SET image_url = ?,
+             updated_at = datetime('now')
+         WHERE name = ?
+           AND category_id = (
+             SELECT id FROM categories WHERE slug = ?
+           )
+           AND updated_at = created_at`,
+        [product.image, product.name, product.cat]
+      );
+    }
+
+    await db.runAsync(
+      `INSERT INTO app_migrations (migration_key)
+       VALUES (?)`,
+      [migrationKey]
+    );
+  });
+}
 
       await db.runAsync(`
         UPDATE restaurant_tables
@@ -229,6 +267,29 @@ async function migratePaymentMethod(db) {
       "ALTER TABLE orders ADD COLUMN payment_method TEXT NOT NULL DEFAULT 'cash' CHECK (payment_method IN ('cash', 'card'))"
     );
   }
+}
+
+async function migrateCocaColaImage(db) {
+  const oldUrl =
+    'https://unsplash.com/photos/clear-drinking-glass-with-ice-and-black-liquid-i597Mg_WSPw';
+
+  const coke = SEED_PRODUCTS.find(
+    (product) => product.name === 'Coca-Cola'
+  );
+
+  if (!coke?.image) return;
+
+  await db.runAsync(
+    `UPDATE products
+     SET image_url = ?,
+         updated_at = datetime('now')
+     WHERE name = 'Coca-Cola'
+       AND category_id = (
+         SELECT id FROM categories WHERE slug = 'drinks'
+       )
+       AND (image_url IS NULL OR image_url = ?)`,
+    [coke.image, oldUrl]
+  );
 }
 
 // ---------- SEED DATA ----------
